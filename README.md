@@ -17,7 +17,9 @@ dailymail/
 ├── comment_scraper.py     # 评论采集（Chrome CDP）
 ├── user_aggregator.py     # 用户数据汇总
 ├── verify.py              # 数据一致性校验
-└── requirements.txt       # Python 依赖
+├── pyproject.toml         # 项目配置 & uv 依赖管理
+├── requirements.txt       # pip 兼容依赖
+└── uv.lock                # 依赖锁定文件
 ```
 
 ## 环境要求
@@ -28,50 +30,61 @@ dailymail/
 
 ## 安装
 
+### uv（推荐）
+
+```bash
+pip install uv          # 安装 uv（仅首次）
+uv sync                 # 同步依赖 + 创建 .venv
+```
+
+### pip（备用）
+
 ```bash
 pip install -r requirements.txt
 ```
 
 ## 使用方式
 
+> 使用 uv 时，命令前加 `uv run`，如 `uv run python main.py --full`
+
 ### 1. 初始化数据库
 
 ```bash
-python main.py --init
+uv run python main.py --init
 ```
 
 ### 2. 全量采集（推荐）
 
 ```bash
 # 串行模式
-python main.py --full
+uv run python main.py --full
 
 # 用户汇总使用 5 Tab 并行
-python main.py --full --parallel 5
+uv run python main.py --full --parallel 5
 ```
 
 ### 3. 分步采集
 
 ```bash
-python main.py --sitemap              # Phase 1: 新闻列表
-python main.py --articles             # Phase 2: 文章详情
-python main.py --comments             # Phase 3: 评论（需 Chrome 调试模式）
-python main.py --users                # Phase 4: 用户汇总
-python main.py --verify               # Phase 5: 数据校验
+uv run python main.py --sitemap              # Phase 1: 新闻列表
+uv run python main.py --articles             # Phase 2: 文章详情
+uv run python main.py --comments             # Phase 3: 评论（需 Chrome 调试模式）
+uv run python main.py --users                # Phase 4: 用户汇总
+uv run python main.py --verify               # Phase 5: 数据校验
 ```
 
 ### 4. 查看进度
 
 ```bash
-python main.py --status               # 各阶段完成度
-python main.py --stats                # 数据库统计
+uv run python main.py --status               # 各阶段完成度
+uv run python main.py --stats                # 数据库统计
 ```
 
 ### 5. 测试模式
 
 ```bash
-python main.py --comments --limit 10   # 只采集 10 篇的评论
-python main.py --users --parallel 3 --limit 50  # 只处理 50 个用户
+uv run python main.py --comments --limit 10   # 只采集 10 篇的评论
+uv run python main.py --users --parallel 3 --limit 50  # 只处理 50 个用户
 ```
 
 ### 6. 中断续传
@@ -79,8 +92,8 @@ python main.py --users --parallel 3 --limit 50  # 只处理 50 个用户
 程序支持断点续传，中断后重新运行相同命令即可自动跳过已完成部分：
 
 ```bash
-python main.py --full                  # 中断后重跑，已完成部分自动跳过
-python main.py --reset --phase users   # 重置用户阶段重新采集
+uv run python main.py --full                  # 中断后重跑，已完成部分自动跳过
+uv run python main.py --reset --phase users   # 重置用户阶段重新采集
 ```
 
 ## Chrome 调试模式

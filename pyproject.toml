@@ -1,0 +1,30 @@
+[project]
+name = "dailymail-scraper"
+version = "1.0.0"
+description = "Daily Mail 全量数据采集系统 - 新闻存档/文章详情/评论/用户汇总"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "lxhlf520" },
+]
+keywords = ["scraper", "daily-mail", "web-scraping", "cdp", "chrome-devtools"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3.12",
+    "Intended Audience :: Developers",
+    "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
+]
+
+dependencies = [
+    "asyncpg>=0.31.0",
+    "websockets>=16.0",
+    "requests>=2.32.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0",
+]
+
+[dependency-groups]
+dev = [
+    "ipython>=8.0",
+    "pytest>=8.0",
+]
