@@ -454,46 +454,46 @@ async def aggregate_users(limit: int | None = None, max_comments_per_user: int |
                 sql += " LIMIT $1"
                 params.append(limit)
             users = await db.fetch(sql, *params)
-            logger.info(f"发现 {len(users)} 个用户需要汇总 (force={force})")
+        logger.info(f"发现 {len(users)} 个用户需要汇总 (force={force})")
 
-            for user in users:
-                user_id = user["user_id"]
-                user_alias = user["user_alias"]
-                user_url = user["user_url"]
+        for user in users:
+            user_id = user["user_id"]
+            user_alias = user["user_alias"]
+            user_url = user["user_url"]
 
-                if not user_id:
-                    continue
+            if not user_id:
+                continue
 
-                # 短线重连检查
-                if not await fetcher.ensure_connected():
-                    logger.error(f"CDP 重连失败，跳过用户: {user_alias} ({user_id})")
-                    stats["errors"] += 1
-                    continue
+            # 短线重连检查（在 DB 操作前，不持有连接）
+            if not await fetcher.ensure_connected():
+                logger.error(f"CDP 重连失败，跳过用户: {user_alias} ({user_id})")
+                stats["errors"] += 1
+                continue
 
-                try:
-                    # 1. 获取 Arrow Factor 统计
-                    arrow_data = await fetch_user_arrowfactor(fetcher, user_id)
+            try:
+                # 1. CDP: 获取 Arrow Factor 统计（不持有数据库连接）
+                arrow_data = await fetch_user_arrowfactor(fetcher, user_id)
 
-                    # 2. 获取用户所有评论
+                # 2. CDP: 提取 Profile 页面字段（不持有数据库连接）
+                profile_fields = {}
+                if COLLECT_PROFILE_FIELDS and user_url:
+                    profile_fields = await fetch_user_profile_fields(
+                        fetcher, user_id, user_url
+                    )
+                    if profile_fields:
+                        logger.info(
+                            f"  {user_alias}: "
+                            + ", ".join(f"{k}={v}" for k, v in profile_fields.items() if v)
+                        )
+
+                # 3. DB: 获取评论 + 写入数据库（短连接，一次完成）
+                async with get_db() as db:
                     comment_count = await process_user_comments(
                         db, fetcher, user_id, user_alias, user_url,
                         max_comments=max_comments_per_user,
                     )
                     stats["user_comments_inserted"] += comment_count
 
-                    # 3. 提取 Profile 页面所有字段（导航到 profile 页面，一次性提取）
-                    profile_fields = {}
-                    if COLLECT_PROFILE_FIELDS and user_url:
-                        profile_fields = await fetch_user_profile_fields(
-                            fetcher, user_id, user_url
-                        )
-                        if profile_fields:
-                            logger.info(
-                                f"  {user_alias}: "
-                                + ", ".join(f"{k}={v}" for k, v in profile_fields.items() if v)
-                            )
-
-                    # 4. 更新用户统计数据（Arrow Factor）
                     if arrow_data:
                         await update_user_stats(
                             db,
@@ -512,7 +512,6 @@ async def aggregate_users(limit: int | None = None, max_comments_per_user: int |
                         stats["arrow_factor_fail"] += 1
                         logger.warning(f"  {user_alias}: Arrow Factor 获取失败")
 
-                    # 5. 更新 Profile 页面字段（Country, Profile_Photo, Facebook_URL, Member_Since）
                     if profile_fields:
                         await update_user_profile(
                             db,
@@ -523,19 +522,18 @@ async def aggregate_users(limit: int | None = None, max_comments_per_user: int |
                             member_since=profile_fields.get("member_since"),
                         )
 
-                    stats["users_updated"] += 1
-
-                    # 标记用户完成（续传支持）
                     await set_progress(db, f"user_{user_id}", "done")
 
-                    if stats["users_updated"] % 100 == 0:
-                        logger.info(f"进度: {stats['users_updated']} 个用户已处理")
+                stats["users_updated"] += 1
 
-                    await asyncio.sleep(COMMENT_DELAY)
+                if stats["users_updated"] % 100 == 0:
+                    logger.info(f"进度: {stats['users_updated']} 个用户已处理")
 
-                except Exception as e:
-                    logger.error(f"处理用户 {user_alias} ({user_id}) 异常: {e}")
-                    stats["errors"] += 1
+                await asyncio.sleep(COMMENT_DELAY)
+
+            except Exception as e:
+                logger.error(f"处理用户 {user_alias} ({user_id}) 异常: {e}")
+                stats["errors"] += 1
 
     finally:
         await fetcher.close()

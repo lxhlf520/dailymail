@@ -176,6 +176,10 @@ async def scrape_articles(batch_size: int = 100, limit: int | None = None) -> di
 
     Returns:
         统计信息
+
+    设计要点：每个数据库操作使用独立的短连接（async with get_db()），
+    避免长时间持有连接导致 Python 3.13 + asyncpg 下连接被提前释放。
+    HTTP 请求在数据库操作之间进行，不持有连接。
     """
     stats = {
         "processed": 0,
@@ -184,41 +188,45 @@ async def scrape_articles(batch_size: int = 100, limit: int | None = None) -> di
         "skipped": 0,
     }
 
-    async with get_db() as db:
-        while True:
+    while True:
+        # 每批获取文章列表（短连接）
+        async with get_db() as db:
             articles = await get_articles_without_details(db, batch_size)
-            if not articles:
-                logger.info("所有文章详情已采集完毕")
-                break
+        if not articles:
+            logger.info("所有文章详情已采集完毕")
+            break
 
-            logger.info(f"本批处理 {len(articles)} 篇文章")
+        logger.info(f"本批处理 {len(articles)} 篇文章")
 
-            reached_limit = False
-            for art in articles:
-                if limit and stats["processed"] >= limit:
-                    logger.info(f"已达到限制 {limit} 篇，停止采集")
-                    reached_limit = True
-                    break
-                article_id = art["article_id"]
-                url = art["url"]
+        for art in articles:
+            if limit and stats["processed"] >= limit:
+                logger.info(f"已达到限制 {limit} 篇，停止采集")
+                return stats
 
-                try:
-                    # 检查进度
-                    progress_key = f"article_{article_id}"
+            article_id = art["article_id"]
+            url = art["url"]
+            progress_key = f"article_{article_id}"
+
+            try:
+                # 1. 检查进度（短连接）
+                async with get_db() as db:
                     if await get_progress(db, progress_key) == "done":
                         stats["skipped"] += 1
                         continue
 
-                    html = await fetch_html(url)
-                    if not html:
-                        stats["failed"] += 1
-                        continue
+                # 2. HTTP 请求（不持有数据库连接）
+                html = await fetch_html(url)
+                if not html:
+                    stats["failed"] += 1
+                    continue
 
-                    result = parse_article(html, url, article_id)
-                    if not result:
-                        stats["failed"] += 1
-                        continue
+                result = parse_article(html, url, article_id)
+                if not result:
+                    stats["failed"] += 1
+                    continue
 
+                # 3. 保存结果 + 标记进度（短连接，一次完成）
+                async with get_db() as db:
                     await insert_article_info(
                         db,
                         result["art_id"],
@@ -232,22 +240,19 @@ async def scrape_articles(batch_size: int = 100, limit: int | None = None) -> di
                         result["share_count"],
                         result["url"],
                     )
-
                     await set_progress(db, progress_key, "done")
-                    stats["success"] += 1
-                    stats["processed"] += 1
 
-                    if stats["processed"] % 50 == 0:
-                        logger.info(f"进度: {stats['processed']} 篇已处理")
+                stats["success"] += 1
+                stats["processed"] += 1
 
-                    await asyncio.sleep(REQUEST_DELAY)
+                if stats["processed"] % 50 == 0:
+                    logger.info(f"进度: {stats['processed']} 篇已处理")
 
-                except Exception as e:
-                    logger.error(f"处理文章异常 {article_id}: {e}")
-                    stats["failed"] += 1
+                await asyncio.sleep(REQUEST_DELAY)
 
-            if reached_limit:
-                break
+            except Exception as e:
+                logger.error(f"处理文章异常 {article_id}: {e}")
+                stats["failed"] += 1
 
     logger.info(
         f"文章详情采集完成: 处理 {stats['processed']} 篇, "
