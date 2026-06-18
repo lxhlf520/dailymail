@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Database (local only)
+*.db
+*.sqlite
+
+# Logs
+*.log
+
+# Temporary files
+_tmp_*.*
+
+# Chrome / Browser data
+chrome-data/
+
+# Environment
+.env
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
