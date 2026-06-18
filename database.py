@@ -39,22 +39,14 @@ async def get_db():
     使用 asyncpg 内置的 pool.acquire() 上下文管理器，
     确保连接生命周期由 PoolConnectionProxy 正确管理，
     避免 Python 3.13 下手动 acquire/release 导致的提前释放问题。
+
+    注意：不再在 except 块中重试 yield —— Python 3.13 的
+    @asynccontextmanager.athrow() 不支持双 yield 模式，会导致
+    RuntimeError: generator didn't stop after athrow()
     """
-    try:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            yield conn
-    except asyncpg.exceptions.InterfaceError:
-        # 连接池可能已损坏（如 PG 服务重启），重建池后重试一次
-        global _pool
-        try:
-            await _pool.close()
-        except Exception:
-            pass
-        _pool = None
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            yield conn
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        yield conn
 
 
 async def close_pool():
@@ -66,6 +58,11 @@ async def close_pool():
         except Exception:
             pass
         _pool = None
+
+
+async def reset_pool():
+    """重建连接池（池损坏时调用，下次 get_pool() 会重新创建）"""
+    await close_pool()
 
 
 # ========================================================================

@@ -7,8 +7,10 @@ import os
 import sys
 from datetime import datetime, timezone
 
+import asyncpg
+
 from config import START_DATE, END_DATE, LOG_FORMAT, LOG_LEVEL, get_chrome_cmd
-from database import init_db, get_db, get_stats, get_progress_stats, set_progress, get_progress
+from database import init_db, get_db, get_stats, get_progress_stats, set_progress, get_progress, reset_pool
 from sitemap_scraper import scrape_sitemap
 from article_scraper import scrape_articles
 from comment_scraper import scrape_comments
@@ -147,11 +149,27 @@ async def cmd_full(start: str, end: str, parallel: int = 0):
 
     for label, name, action in phases:
         print(f"\n{label} 采集{name}...")
-        try:
-            await action()
-        except Exception as e:
-            logger.error(f"{label} {name} 异常: {e}", exc_info=True)
-            print(f"  ⚠ {name} 阶段异常: {e}")
+        phase_ok = False
+        for attempt in range(2):
+            try:
+                await action()
+                phase_ok = True
+                break  # 成功
+            except asyncpg.exceptions.InterfaceError as e:
+                logger.warning(f"{label} {name} 连接池异常 (attempt {attempt + 1}): {e}")
+                if attempt == 0:
+                    print(f"  连接池异常，重建后重试...")
+                    await reset_pool()
+                    await asyncio.sleep(1)
+                else:
+                    logger.error(f"{label} {name} 重试后仍失败: {e}")
+                    print(f"  ⚠ {name} 阶段异常: {e}")
+            except Exception as e:
+                logger.error(f"{label} {name} 异常: {e}", exc_info=True)
+                print(f"  ⚠ {name} 阶段异常: {e}")
+                break
+
+        if not phase_ok:
             failed.append(name)
             # 非校验阶段失败不中断整体流程
             if name == "数据校验":
