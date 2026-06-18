@@ -28,6 +28,17 @@ COMMENT_MAX_RETRY = 3
 CDP_HOST = "127.0.0.1"
 CDP_PORT = 9222
 CDP_WS_URL = f"ws://{CDP_HOST}:{CDP_PORT}/devtools/browser/"
+CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+
+
+def get_chrome_cmd() -> str:
+    """获取 Chrome 调试模式启动命令"""
+    proxy_arg = get_chrome_proxy_arg()
+    parts = [f'"{CHROME_PATH}"', f"--remote-debugging-port={CDP_PORT}"]
+    if proxy_arg:
+        parts.append(proxy_arg)
+    return " ".join(parts)
+
 
 # 基础 URL
 BASE_URL = "https://www.dailymail.com"

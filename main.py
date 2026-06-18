@@ -7,7 +7,7 @@ import os
 import sys
 from datetime import datetime, timezone
 
-from config import START_DATE, END_DATE, LOG_FORMAT, LOG_LEVEL
+from config import START_DATE, END_DATE, LOG_FORMAT, LOG_LEVEL, get_chrome_cmd
 from database import init_db, get_db, get_stats, get_progress_stats, set_progress, get_progress
 from sitemap_scraper import scrape_sitemap
 from article_scraper import scrape_articles
@@ -72,7 +72,7 @@ async def cmd_articles(batch_size: int):
 async def cmd_comments(limit: int | None):
     """采集评论"""
     print("开始采集评论...")
-    print("注意: 请确保 Chrome 已启动调试模式 (chrome --remote-debugging-port=9222)")
+    print(f"注意: 请确保 Chrome 已启动调试模式:\n  {get_chrome_cmd()}")
     stats = await scrape_comments(limit)
     print(f"评论采集完成: {stats}")
 
