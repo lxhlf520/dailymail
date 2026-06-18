@@ -18,31 +18,12 @@ _pool: asyncpg.Pool | None = None
 
 
 async def get_pool() -> asyncpg.Pool:
-    """获取或创建连接池（自动处理断连/Python版本兼容）"""
+    """获取或创建连接池（懒初始化，异常时自动重建）"""
     global _pool
     if _pool is None:
         _pool = await asyncpg.create_pool(
             PG_DSN,
-            min_size=1,
-            max_size=10,
-            command_timeout=60,
-            max_inactive_connection_lifetime=300,
-            ssl=False,
-        )
-        return _pool
-    try:
-        # 验证池是否可用：尝试快速获取并释放一个连接
-        conn = await _pool.acquire(timeout=5)
-        await _pool.release(conn)
-    except Exception:
-        # 池已损坏，关闭并重建
-        try:
-            await _pool.close()
-        except Exception:
-            pass
-        _pool = await asyncpg.create_pool(
-            PG_DSN,
-            min_size=1,
+            min_size=2,
             max_size=10,
             command_timeout=60,
             max_inactive_connection_lifetime=300,
@@ -53,13 +34,27 @@ async def get_pool() -> asyncpg.Pool:
 
 @asynccontextmanager
 async def get_db():
-    """异步数据库连接上下文管理器"""
-    pool = await get_pool()
-    conn = await pool.acquire()
+    """异步数据库连接上下文管理器
+
+    使用 asyncpg 内置的 pool.acquire() 上下文管理器，
+    确保连接生命周期由 PoolConnectionProxy 正确管理，
+    避免 Python 3.13 下手动 acquire/release 导致的提前释放问题。
+    """
     try:
-        yield conn
-    finally:
-        await pool.release(conn)
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            yield conn
+    except asyncpg.exceptions.InterfaceError:
+        # 连接池可能已损坏（如 PG 服务重启），重建池后重试一次
+        global _pool
+        try:
+            await _pool.close()
+        except Exception:
+            pass
+        _pool = None
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            yield conn
 
 
 async def close_pool():
