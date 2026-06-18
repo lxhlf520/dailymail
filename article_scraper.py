@@ -202,44 +202,49 @@ async def scrape_articles(batch_size: int = 100, limit: int | None = None) -> di
                 article_id = art["article_id"]
                 url = art["url"]
 
-                # 检查进度
-                progress_key = f"article_{article_id}"
-                if await get_progress(db, progress_key) == "done":
-                    stats["skipped"] += 1
-                    continue
+                try:
+                    # 检查进度
+                    progress_key = f"article_{article_id}"
+                    if await get_progress(db, progress_key) == "done":
+                        stats["skipped"] += 1
+                        continue
 
-                html = await fetch_html(url)
-                if not html:
+                    html = await fetch_html(url)
+                    if not html:
+                        stats["failed"] += 1
+                        continue
+
+                    result = parse_article(html, url, article_id)
+                    if not result:
+                        stats["failed"] += 1
+                        continue
+
+                    await insert_article_info(
+                        db,
+                        result["art_id"],
+                        result["title"],
+                        result["author"],
+                        result["published_at"],
+                        result["updated_at"],
+                        result["tag1"],
+                        result["tag2"],
+                        result["comments_count"],
+                        result["share_count"],
+                        result["url"],
+                    )
+
+                    await set_progress(db, progress_key, "done")
+                    stats["success"] += 1
+                    stats["processed"] += 1
+
+                    if stats["processed"] % 50 == 0:
+                        logger.info(f"进度: {stats['processed']} 篇已处理")
+
+                    await asyncio.sleep(REQUEST_DELAY)
+
+                except Exception as e:
+                    logger.error(f"处理文章异常 {article_id}: {e}")
                     stats["failed"] += 1
-                    continue
-
-                result = parse_article(html, url, article_id)
-                if not result:
-                    stats["failed"] += 1
-                    continue
-
-                await insert_article_info(
-                    db,
-                    result["art_id"],
-                    result["title"],
-                    result["author"],
-                    result["published_at"],
-                    result["updated_at"],
-                    result["tag1"],
-                    result["tag2"],
-                    result["comments_count"],
-                    result["share_count"],
-                    result["url"],
-                )
-
-                await set_progress(db, progress_key, "done")
-                stats["success"] += 1
-                stats["processed"] += 1
-
-                if stats["processed"] % 50 == 0:
-                    logger.info(f"进度: {stats['processed']} 篇已处理")
-
-                await asyncio.sleep(REQUEST_DELAY)
 
             if reached_limit:
                 break
