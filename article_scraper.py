@@ -167,11 +167,12 @@ def parse_article(html: str, url: str, article_id: str) -> dict | None:
     }
 
 
-async def scrape_articles(batch_size: int = 100) -> dict:
+async def scrape_articles(batch_size: int = 100, limit: int | None = None) -> dict:
     """采集文章详情
 
     Args:
         batch_size: 每批处理的文章数量
+        limit: 最多采集篇数，None=全部
 
     Returns:
         统计信息
@@ -192,7 +193,12 @@ async def scrape_articles(batch_size: int = 100) -> dict:
 
             logger.info(f"本批处理 {len(articles)} 篇文章")
 
+            reached_limit = False
             for art in articles:
+                if limit and stats["processed"] >= limit:
+                    logger.info(f"已达到限制 {limit} 篇，停止采集")
+                    reached_limit = True
+                    break
                 article_id = art["article_id"]
                 url = art["url"]
 
@@ -234,6 +240,9 @@ async def scrape_articles(batch_size: int = 100) -> dict:
                     logger.info(f"进度: {stats['processed']} 篇已处理")
 
                 await asyncio.sleep(REQUEST_DELAY)
+
+            if reached_limit:
+                break
 
     logger.info(
         f"文章详情采集完成: 处理 {stats['processed']} 篇, "

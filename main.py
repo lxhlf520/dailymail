@@ -62,10 +62,13 @@ async def cmd_sitemap(start: str, end: str):
     print(f"Sitemap 采集完成: {stats}")
 
 
-async def cmd_articles(batch_size: int):
+async def cmd_articles(batch_size: int, limit: int | None = None):
     """采集文章详情"""
-    print("开始采集文章详情...")
-    stats = await scrape_articles(batch_size)
+    if limit:
+        print(f"开始采集文章详情 (最多 {limit} 篇)...")
+    else:
+        print("开始采集文章详情...")
+    stats = await scrape_articles(batch_size, limit=limit)
     print(f"文章详情采集完成: {stats}")
 
 
@@ -134,7 +137,7 @@ async def cmd_full(start: str, end: str, parallel: int = 0):
 
     phases = [
         ("Phase 1/5", "Sitemap 新闻列表", lambda: cmd_sitemap(start, end)),
-        ("Phase 2/5", "文章详情", lambda: cmd_articles(batch_size=100)),
+        ("Phase 2/5", "文章详情", lambda: cmd_articles(batch_size=100, limit=None)),
         ("Phase 3/5", "评论采集", lambda: cmd_comments(limit=None)),
         ("Phase 4/5", "用户汇总", lambda: cmd_users(limit=None, max_comments=None, force=False, parallel=parallel if parallel else None)),
         ("Phase 5/5", "数据校验", lambda: cmd_verify()),
@@ -307,7 +310,7 @@ def main():
             asyncio.run(cmd_sitemap(args.start, args.end))
 
         if args.articles:
-            asyncio.run(cmd_articles(args.batch_size))
+            asyncio.run(cmd_articles(args.batch_size, args.limit))
 
         if args.comments:
             asyncio.run(cmd_comments(args.limit))
