@@ -18,14 +18,34 @@ _pool: asyncpg.Pool | None = None
 
 
 async def get_pool() -> asyncpg.Pool:
-    """获取或创建连接池"""
+    """获取或创建连接池（自动处理断连/Python版本兼容）"""
     global _pool
-    if _pool is None or _pool._closed:
+    if _pool is None:
         _pool = await asyncpg.create_pool(
             PG_DSN,
             min_size=1,
             max_size=10,
             command_timeout=60,
+            max_inactive_connection_lifetime=300,
+            ssl=False,
+        )
+        return _pool
+    try:
+        # 验证池是否可用：尝试快速获取并释放一个连接
+        conn = await _pool.acquire(timeout=5)
+        await _pool.release(conn)
+    except Exception:
+        # 池已损坏，关闭并重建
+        try:
+            await _pool.close()
+        except Exception:
+            pass
+        _pool = await asyncpg.create_pool(
+            PG_DSN,
+            min_size=1,
+            max_size=10,
+            command_timeout=60,
+            max_inactive_connection_lifetime=300,
             ssl=False,
         )
     return _pool
@@ -45,8 +65,11 @@ async def get_db():
 async def close_pool():
     """关闭连接池"""
     global _pool
-    if _pool and not _pool._closed:
-        await _pool.close()
+    if _pool is not None:
+        try:
+            await _pool.close()
+        except Exception:
+            pass
         _pool = None
 
 

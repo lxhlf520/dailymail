@@ -15,6 +15,8 @@ from comment_scraper import scrape_comments
 from user_aggregator import aggregate_users, aggregate_users_parallel
 from verify import run_verification
 
+logger = logging.getLogger(__name__)
+
 
 def setup_logging():
     """配置日志"""
