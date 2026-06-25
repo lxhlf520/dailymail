@@ -258,17 +258,17 @@ class CDPCommentFetcher:
                                 logger.error(f"JSON 解析错误: {e}")
                                 return None
 
-                        # 429 限流: Akamai / CDN 触发 rate limit 或 challenge
-                        if status == 429:
+                        # 429 / 403: Akamai WAF 限流或拒绝访问
+                        if status in (429, 403):
                             is_challenge = "cpr_chlge" in body
                             backoff = COMMENT_RATELIMIT_BACKOFF[min(attempt, len(COMMENT_RATELIMIT_BACKOFF) - 1)]
+                            tag = "403 forbidden" if status == 403 else ("429 challenge" if is_challenge else "429 rate limit")
                             logger.warning(
-                                f"评论 API 429 限流 (attempt {attempt + 1}/{COMMENT_MAX_RETRY}): "
-                                f"{'challenge' if is_challenge else 'rate limit'}, "
+                                f"评论 API {tag} (attempt {attempt + 1}/{COMMENT_MAX_RETRY}), "
                                 f"等待 {backoff}s 后重试..."
                             )
-                            # challenge 时重新导航刷新 cookie/session
-                            if is_challenge and article_url:
+                            # re-navigate 刷新 cookie/session
+                            if article_url:
                                 logger.info(f"  re-navigate 刷新 session: {article_url[:80]}...")
                                 await self.navigate(article_url)
                             await asyncio.sleep(backoff)

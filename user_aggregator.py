@@ -102,15 +102,15 @@ async def fetch_user_arrowfactor(fetcher: CDPCommentFetcher, user_id: str, user_
                             logger.error(f"Arrow Factor JSON 解析错误: {e}")
                             return None
 
-                    if status == 429:
+                    if status in (429, 403):
                         is_challenge = "cpr_chlge" in body
                         backoff = COMMENT_RATELIMIT_BACKOFF[min(attempt, len(COMMENT_RATELIMIT_BACKOFF) - 1)]
+                        tag = "403 forbidden" if status == 403 else ("429 challenge" if is_challenge else "429 rate limit")
                         logger.warning(
-                            f"Arrow Factor API 429 限流 (attempt {attempt + 1}/{COMMENT_MAX_RETRY}): "
-                            f"{'challenge' if is_challenge else 'rate limit'}, "
+                            f"Arrow Factor API {tag} (attempt {attempt + 1}/{COMMENT_MAX_RETRY}), "
                             f"等待 {backoff}s 后重试..."
                         )
-                        if is_challenge and user_url:
+                        if user_url:
                             logger.info(f"  re-navigate 刷新 session: {user_url[:80]}...")
                             await fetcher.navigate(user_url)
                         await asyncio.sleep(backoff)
@@ -278,15 +278,15 @@ async def fetch_user_comments_page(
                             logger.error(f"用户评论 JSON 解析错误: {e}")
                             return None
 
-                    if status == 429:
+                    if status in (429, 403):
                         is_challenge = "cpr_chlge" in body
                         backoff = COMMENT_RATELIMIT_BACKOFF[min(attempt, len(COMMENT_RATELIMIT_BACKOFF) - 1)]
+                        tag = "403 forbidden" if status == 403 else ("429 challenge" if is_challenge else "429 rate limit")
                         logger.warning(
-                            f"用户评论 API 429 限流 (attempt {attempt + 1}/{COMMENT_MAX_RETRY}): "
-                            f"{'challenge' if is_challenge else 'rate limit'}, "
+                            f"用户评论 API {tag} (attempt {attempt + 1}/{COMMENT_MAX_RETRY}), "
                             f"等待 {backoff}s 后重试..."
                         )
-                        if is_challenge and user_url:
+                        if user_url:
                             logger.info(f"  re-navigate 刷新 session: {user_url[:80]}...")
                             await fetcher.navigate(user_url)
                         await asyncio.sleep(backoff)
