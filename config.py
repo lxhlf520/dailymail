@@ -21,8 +21,9 @@ REQUEST_DELAY = 0.8  # 文章页面请求间隔（秒）
 
 # 评论 API 配置
 COMMENT_BATCH_SIZE = 50  # 每页评论数
-COMMENT_DELAY = 1.5      # 评论 API 请求间隔（秒）
+COMMENT_DELAY = 3.0      # 评论 API 请求间隔（秒），低于3秒可能触发429限流
 COMMENT_MAX_RETRY = 3
+COMMENT_RATELIMIT_BACKOFF = [10, 30, 60]  # 429 限流时退避秒数
 
 # CDP 配置
 CDP_HOST = "127.0.0.1"

@@ -21,6 +21,7 @@ from config import (
     CDP_PORT,
     COMMENT_DELAY,
     COMMENT_MAX_RETRY,
+    COMMENT_RATELIMIT_BACKOFF,
     COLLECT_PROFILE_FIELDS,
 )
 from database import (
@@ -40,11 +41,14 @@ logger = logging.getLogger(__name__)
 USER_COMMENT_BATCH_SIZE = 100
 
 
-async def fetch_user_arrowfactor(fetcher: CDPCommentFetcher, user_id: str) -> dict | None:
+async def fetch_user_arrowfactor(fetcher: CDPCommentFetcher, user_id: str, user_url: str = "") -> dict | None:
     """获取用户的 Arrow Factor 统计数据 (总点赞/点踩/评论数)
 
     API: /reader-comments/p/user/arrowfactor/{user_id}?period=archive
     返回: {commentCount, votesUp, votesDown, voteRating}
+
+    Args:
+        user_url: 用户 profile URL，用于 429 限流时重新导航刷新 cookie
     """
     url = f"https://www.dailymail.com/reader-comments/p/user/arrowfactor/{user_id}?period=archive"
 
@@ -80,9 +84,13 @@ async def fetch_user_arrowfactor(fetcher: CDPCommentFetcher, user_id: str) -> di
                         logger.warning(f"Arrow Factor XHR 错误: {value['error']}")
                         await asyncio.sleep(2 ** attempt)
                         continue
-                    if value.get("status") == 200:
+
+                    status = value.get("status", 0)
+                    body = value.get("body", "")
+
+                    if status == 200:
                         try:
-                            data = json.loads(value["body"])
+                            data = json.loads(body)
                             payload = data.get("payload", {})
                             return {
                                 "comment_count": payload.get("commentCount", 0),
@@ -93,10 +101,24 @@ async def fetch_user_arrowfactor(fetcher: CDPCommentFetcher, user_id: str) -> di
                         except json.JSONDecodeError as e:
                             logger.error(f"Arrow Factor JSON 解析错误: {e}")
                             return None
-                    else:
-                        logger.warning(f"Arrow Factor API 状态 {value.get('status')}")
-                        await asyncio.sleep(2 ** attempt)
+
+                    if status == 429:
+                        is_challenge = "cpr_chlge" in body
+                        backoff = COMMENT_RATELIMIT_BACKOFF[min(attempt, len(COMMENT_RATELIMIT_BACKOFF) - 1)]
+                        logger.warning(
+                            f"Arrow Factor API 429 限流 (attempt {attempt + 1}/{COMMENT_MAX_RETRY}): "
+                            f"{'challenge' if is_challenge else 'rate limit'}, "
+                            f"等待 {backoff}s 后重试..."
+                        )
+                        if is_challenge and user_url:
+                            logger.info(f"  re-navigate 刷新 session: {user_url[:80]}...")
+                            await fetcher.navigate(user_url)
+                        await asyncio.sleep(backoff)
                         continue
+
+                    logger.warning(f"Arrow Factor API 状态 {status}: {body[:100]}")
+                    await asyncio.sleep(2 ** attempt)
+                    continue
         except Exception as e:
             logger.warning(f"Arrow Factor 请求异常 (attempt {attempt + 1}): {e}")
             await asyncio.sleep(2 ** attempt)
@@ -194,11 +216,15 @@ async def fetch_user_comments_page(
     user_id: str,
     offset: int = 0,
     max_count: int = USER_COMMENT_BATCH_SIZE,
+    user_url: str = "",
 ) -> tuple[list[dict], int] | None:
     """获取用户评论的一页数据
 
     API: /reader-comments/p/user/readcomments/{user_id}?max=N&offset=O&period=archive&order=desc
     返回: (评论列表, 总父评论数) 或 None
+
+    Args:
+        user_url: 用户 profile URL，用于 429 限流时重新导航刷新 cookie
     """
     url = (
         f"https://www.dailymail.com/reader-comments/p/user/readcomments/"
@@ -237,9 +263,13 @@ async def fetch_user_comments_page(
                         logger.warning(f"用户评论 XHR 错误: {value['error']}")
                         await asyncio.sleep(2 ** attempt)
                         continue
-                    if value.get("status") == 200:
+
+                    status = value.get("status", 0)
+                    body = value.get("body", "")
+
+                    if status == 200:
                         try:
-                            data = json.loads(value["body"])
+                            data = json.loads(body)
                             payload = data.get("payload", {})
                             comments = payload.get("page", [])
                             parent_count = payload.get("parentCommentsCount", 0)
@@ -247,10 +277,24 @@ async def fetch_user_comments_page(
                         except json.JSONDecodeError as e:
                             logger.error(f"用户评论 JSON 解析错误: {e}")
                             return None
-                    else:
-                        logger.warning(f"用户评论 API 状态 {value.get('status')}")
-                        await asyncio.sleep(2 ** attempt)
+
+                    if status == 429:
+                        is_challenge = "cpr_chlge" in body
+                        backoff = COMMENT_RATELIMIT_BACKOFF[min(attempt, len(COMMENT_RATELIMIT_BACKOFF) - 1)]
+                        logger.warning(
+                            f"用户评论 API 429 限流 (attempt {attempt + 1}/{COMMENT_MAX_RETRY}): "
+                            f"{'challenge' if is_challenge else 'rate limit'}, "
+                            f"等待 {backoff}s 后重试..."
+                        )
+                        if is_challenge and user_url:
+                            logger.info(f"  re-navigate 刷新 session: {user_url[:80]}...")
+                            await fetcher.navigate(user_url)
+                        await asyncio.sleep(backoff)
                         continue
+
+                    logger.warning(f"用户评论 API 状态 {status}: {body[:100]}")
+                    await asyncio.sleep(2 ** attempt)
+                    continue
         except Exception as e:
             logger.warning(f"用户评论请求异常 (attempt {attempt + 1}): {e}")
             await asyncio.sleep(2 ** attempt)
@@ -279,7 +323,7 @@ async def process_user_comments(
     offset = 0
 
     while True:
-        result = await fetch_user_comments_page(fetcher, user_id, offset)
+        result = await fetch_user_comments_page(fetcher, user_id, offset, USER_COMMENT_BATCH_SIZE, user_url)
         if result is None:
             logger.error(f"获取用户评论失败: {user_alias} ({user_id})")
             break
@@ -472,7 +516,7 @@ async def aggregate_users(limit: int | None = None, max_comments_per_user: int |
 
             try:
                 # 1. CDP: 获取 Arrow Factor 统计（不持有数据库连接）
-                arrow_data = await fetch_user_arrowfactor(fetcher, user_id)
+                arrow_data = await fetch_user_arrowfactor(fetcher, user_id, user_url)
 
                 # 2. CDP: 提取 Profile 页面字段（不持有数据库连接）
                 profile_fields = {}
@@ -590,7 +634,7 @@ async def _process_user_worker(
         try:
             async with get_db() as db:
                 # 1. Arrow Factor
-                arrow_data = await fetch_user_arrowfactor(fetcher, user_id)
+                arrow_data = await fetch_user_arrowfactor(fetcher, user_id, user_url)
 
                 # 2. 用户评论
                 comment_count = await process_user_comments(

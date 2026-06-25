@@ -17,6 +17,7 @@ from config import (
     COMMENT_BATCH_SIZE,
     COMMENT_DELAY,
     COMMENT_MAX_RETRY,
+    COMMENT_RATELIMIT_BACKOFF,
 )
 from database import (
     get_db,
@@ -189,8 +190,13 @@ class CDPCommentFetcher:
         article_id: str,
         max_count: int = COMMENT_BATCH_SIZE,
         offset: int = 0,
+        article_url: str = "",
     ) -> dict | None:
-        """通过浏览器 XMLHttpRequest 获取评论 API 数据"""
+        """通过浏览器 XMLHttpRequest 获取评论 API 数据
+
+        Args:
+            article_url: 文章 URL，用于 429 限流时重新导航刷新 cookie
+        """
         url = (
             f"https://www.dailymail.com/reader-comments/p/asset/readcomments/"
             f"{article_id}?max={max_count}&offset={offset}&order=desc"
@@ -241,18 +247,38 @@ class CDPCommentFetcher:
                             logger.warning(f"浏览器 XHR 错误: {value['error']}")
                             await asyncio.sleep(2 ** attempt)
                             continue
-                        if value.get("status") == 200:
+
+                        status = value.get("status", 0)
+                        body = value.get("body", "")
+
+                        if status == 200:
                             try:
-                                return json.loads(value["body"])
+                                return json.loads(body)
                             except json.JSONDecodeError as e:
                                 logger.error(f"JSON 解析错误: {e}")
                                 return None
-                        else:
+
+                        # 429 限流: Akamai / CDN 触发 rate limit 或 challenge
+                        if status == 429:
+                            is_challenge = "cpr_chlge" in body
+                            backoff = COMMENT_RATELIMIT_BACKOFF[min(attempt, len(COMMENT_RATELIMIT_BACKOFF) - 1)]
                             logger.warning(
-                                f"评论 API 返回状态 {value.get('status')}: {value.get('body', '')[:100]}"
+                                f"评论 API 429 限流 (attempt {attempt + 1}/{COMMENT_MAX_RETRY}): "
+                                f"{'challenge' if is_challenge else 'rate limit'}, "
+                                f"等待 {backoff}s 后重试..."
                             )
-                            await asyncio.sleep(2 ** attempt)
+                            # challenge 时重新导航刷新 cookie/session
+                            if is_challenge and article_url:
+                                logger.info(f"  re-navigate 刷新 session: {article_url[:80]}...")
+                                await self.navigate(article_url)
+                            await asyncio.sleep(backoff)
                             continue
+
+                        logger.warning(
+                            f"评论 API 返回状态 {status}: {body[:100]}"
+                        )
+                        await asyncio.sleep(2 ** attempt)
+                        continue
 
             except Exception as e:
                 logger.warning(f"获取评论异常 (attempt {attempt + 1}): {e}")
@@ -423,7 +449,7 @@ async def scrape_comments_for_article(
     offset = 0
 
     while True:
-        data = await fetcher.fetch_comments(article_id, COMMENT_BATCH_SIZE, offset)
+        data = await fetcher.fetch_comments(article_id, COMMENT_BATCH_SIZE, offset, article_url)
         if not data:
             logger.error(f"无法获取评论数据: {article_id}")
             break
