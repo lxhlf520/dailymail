@@ -282,6 +282,11 @@ class CDPCommentFetcher:
 
             except Exception as e:
                 logger.warning(f"获取评论异常 (attempt {attempt + 1}): {e}")
+                # WebSocket 断连时先重连再重试
+                try:
+                    await self.reconnect()
+                except Exception:
+                    pass
                 await asyncio.sleep(2 ** attempt)
 
         logger.error(f"获取评论最终失败: article_id={article_id}")

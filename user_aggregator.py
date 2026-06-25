@@ -121,6 +121,11 @@ async def fetch_user_arrowfactor(fetcher: CDPCommentFetcher, user_id: str, user_
                     continue
         except Exception as e:
             logger.warning(f"Arrow Factor 请求异常 (attempt {attempt + 1}): {e}")
+            # WebSocket 断连时先重连再重试
+            try:
+                await fetcher.reconnect()
+            except Exception:
+                pass
             await asyncio.sleep(2 ** attempt)
 
     logger.error(f"Arrow Factor 获取失败: user_id={user_id}")
@@ -297,6 +302,11 @@ async def fetch_user_comments_page(
                     continue
         except Exception as e:
             logger.warning(f"用户评论请求异常 (attempt {attempt + 1}): {e}")
+            # WebSocket 断连时先重连再重试
+            try:
+                await fetcher.reconnect()
+            except Exception:
+                pass
             await asyncio.sleep(2 ** attempt)
 
     logger.error(f"用户评论获取失败: user_id={user_id}")
