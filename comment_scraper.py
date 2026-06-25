@@ -267,11 +267,16 @@ class CDPCommentFetcher:
                                 f"评论 API {tag} (attempt {attempt + 1}/{COMMENT_MAX_RETRY}), "
                                 f"等待 {backoff}s 后重试..."
                             )
-                            # re-navigate 刷新 cookie/session
+                            # 先导航首页暖机建立 cookie，再导航文章页
+                            logger.info(f"  导航首页暖机: {BASE_URL}")
+                            await self.navigate(BASE_URL)
+                            await asyncio.sleep(backoff // 2)
                             if article_url:
-                                logger.info(f"  re-navigate 刷新 session: {article_url[:80]}...")
+                                logger.info(f"  导航文章页: {article_url[:80]}...")
                                 await self.navigate(article_url)
-                            await asyncio.sleep(backoff)
+                                await asyncio.sleep(backoff - backoff // 2)
+                            else:
+                                await asyncio.sleep(backoff - backoff // 2)
                             continue
 
                         logger.warning(

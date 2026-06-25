@@ -110,10 +110,16 @@ async def fetch_user_arrowfactor(fetcher: CDPCommentFetcher, user_id: str, user_
                             f"Arrow Factor API {tag} (attempt {attempt + 1}/{COMMENT_MAX_RETRY}), "
                             f"等待 {backoff}s 后重试..."
                         )
+                        # 先导航首页暖机建立 cookie，再导航用户页
+                        logger.info(f"  导航首页暖机: {BASE_URL}")
+                        await fetcher.navigate(BASE_URL)
+                        await asyncio.sleep(backoff // 2)
                         if user_url:
-                            logger.info(f"  re-navigate 刷新 session: {user_url[:80]}...")
+                            logger.info(f"  导航用户页: {user_url[:80]}...")
                             await fetcher.navigate(user_url)
-                        await asyncio.sleep(backoff)
+                            await asyncio.sleep(backoff - backoff // 2)
+                        else:
+                            await asyncio.sleep(backoff - backoff // 2)
                         continue
 
                     logger.warning(f"Arrow Factor API 状态 {status}: {body[:100]}")
@@ -291,10 +297,16 @@ async def fetch_user_comments_page(
                             f"用户评论 API {tag} (attempt {attempt + 1}/{COMMENT_MAX_RETRY}), "
                             f"等待 {backoff}s 后重试..."
                         )
+                        # 先导航首页暖机建立 cookie，再导航用户页
+                        logger.info(f"  导航首页暖机: {BASE_URL}")
+                        await fetcher.navigate(BASE_URL)
+                        await asyncio.sleep(backoff // 2)
                         if user_url:
-                            logger.info(f"  re-navigate 刷新 session: {user_url[:80]}...")
+                            logger.info(f"  导航用户页: {user_url[:80]}...")
                             await fetcher.navigate(user_url)
-                        await asyncio.sleep(backoff)
+                            await asyncio.sleep(backoff - backoff // 2)
+                        else:
+                            await asyncio.sleep(backoff - backoff // 2)
                         continue
 
                     logger.warning(f"用户评论 API 状态 {status}: {body[:100]}")
