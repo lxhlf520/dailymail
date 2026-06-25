@@ -344,13 +344,13 @@ async def process_user_comments(
             upvote = (vote_count + vote_rating) // 2
             down_vote = (vote_count - vote_rating) // 2
 
-            comment_text = cmt.get("message", "")
-            comment_time = cmt.get("dateCreated", "")
-            location_str = cmt.get("userLocation", "")
+            comment_text = cmt.get("message") or ""
+            comment_time = cmt.get("dateCreated") or ""
+            location_str = cmt.get("userLocation") or ""
             city, country = parse_location(location_str)
 
             # 构建评论URL
-            asset_url = cmt.get("assetUrl", "")
+            asset_url = cmt.get("assetUrl") or ""
             if asset_url:
                 comment_url = f"https://www.dailymail.com{asset_url}#comment-{comment_id}"
             else:
@@ -395,11 +395,11 @@ async def process_user_comments(
                     sub_vr = sub.get("voteRating", 0)
                     sub_up = (sub_vc + sub_vr) // 2
                     sub_down = (sub_vc - sub_vr) // 2
-                    sub_text = sub.get("message", "")
-                    sub_time = sub.get("dateCreated", "")
-                    sub_loc = sub.get("userLocation", "")
+                    sub_text = sub.get("message") or ""
+                    sub_time = sub.get("dateCreated") or ""
+                    sub_loc = sub.get("userLocation") or ""
                     sub_city, sub_country = parse_location(sub_loc)
-                    sub_asset_url = sub.get("assetUrl", asset_url)
+                    sub_asset_url = sub.get("assetUrl") or asset_url
                     sub_comment_url = f"https://www.dailymail.com{sub_asset_url}#comment-{sub_id}" if sub_asset_url else ""
 
                     try:

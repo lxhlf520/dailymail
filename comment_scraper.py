@@ -347,6 +347,9 @@ def parse_location(location_str: str) -> tuple[str, str]:
 
 def build_user_url(user_id: str, user_alias: str) -> str:
     """构建用户 profile URL"""
+    # 防御 None 值（API 字段可能为 null）
+    if not user_alias:
+        user_alias = "user"
     # URL-friendly alias
     safe_alias = re.sub(r"[^\w\-]", "-", user_alias).strip("-")
     return f"{BASE_URL}/registration/{user_id}/{safe_alias}/profile.html"
@@ -371,12 +374,12 @@ async def process_comment_tree(
         if not comment_id:
             continue
 
-        user_alias = cmt.get("userAlias", "")
-        user_id = str(cmt.get("userIdentifier", ""))
-        location_str = cmt.get("userLocation", "")
+        user_alias = cmt.get("userAlias") or ""
+        user_id = str(cmt.get("userIdentifier") or "")
+        location_str = cmt.get("userLocation") or ""
         city, country = parse_location(location_str)
-        comment_text = cmt.get("message", "")
-        comment_time = cmt.get("dateCreated", "")
+        comment_text = cmt.get("message") or ""
+        comment_time = cmt.get("dateCreated") or ""
         vote_count = cmt.get("voteCount", 0)
         vote_rating = cmt.get("voteRating", 0)
         # voteCount = 总投票数 (upvote + downvote)
@@ -385,7 +388,10 @@ async def process_comment_tree(
         #       downvote = (voteCount - voteRating) / 2
         upvote = (vote_count + vote_rating) // 2
         down_vote = (vote_count - vote_rating) // 2
-        replies_count = cmt.get("replies", {}).get("totalCount", 0)
+        replies_data = cmt.get("replies", {})
+        replies_count = 0
+        if isinstance(replies_data, dict):
+            replies_count = replies_data.get("totalCount", 0)
 
         user_url = build_user_url(user_id, user_alias) if user_id else ""
         comment_url = build_comment_url(article_url, comment_id)
@@ -417,7 +423,9 @@ async def process_comment_tree(
         count += 1
 
         # 递归处理回复
-        replies = cmt.get("replies", {}).get("comments", [])
+        replies = []
+        if isinstance(replies_data, dict):
+            replies = replies_data.get("comments", [])
         if replies:
             count += await process_comment_tree(db, article_id, article_url, replies, comment_id)
 
