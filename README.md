@@ -98,14 +98,22 @@ uv run python main.py --reset --phase users   # 重置用户阶段重新采集
 
 ## Chrome 调试模式
 
-评论采集需要 Chrome 以调试模式运行：
+评论采集和用户汇总需要 Chrome 以调试模式运行。
 
-```bash
-# 无代理
-chrome --remote-debugging-port=9222
+### 启动命令（Windows）
 
-# 带代理
-chrome --remote-debugging-port=9222 --proxy-server=127.0.0.1:10809
+```powershell
+# 无代理（默认）
+"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
+
+# 如果端口冲突（已有普通 Chrome 在跑），加独立 profile
+"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir=C:\chrome_debug_profile
+```
+
+### 带代理
+
+```powershell
+"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --proxy-server=127.0.0.1:10809
 ```
 
 ## 代理配置
