@@ -26,12 +26,15 @@ from config import (
 )
 from database import (
     get_db,
+    get_pool,
     update_user_stats,
     update_user_profile,
     upsert_user,
     insert_user_comment,
     set_progress,
     get_progress,
+    try_acquire_lock,
+    release_lock,
 )
 from comment_scraper import CDPCommentFetcher, build_user_url, parse_location
 
@@ -522,84 +525,100 @@ async def aggregate_users(limit: int | None = None, max_comments_per_user: int |
             users = await db.fetch(sql, *params)
         logger.info(f"发现 {len(users)} 个用户需要汇总 (force={force})")
 
-        for user in users:
-            user_id = user["user_id"]
-            user_alias = user["user_alias"]
-            user_url = user["user_url"]
+        # 持久连接用于 advisory lock（连接断开时 PostgreSQL 自动释放锁）
+        pool = await get_pool()
+        async with pool.acquire() as lock_conn:
+            for user in users:
+                user_id = user["user_id"]
+                user_alias = user["user_alias"]
+                user_url = user["user_url"]
 
-            if not user_id:
-                continue
+                if not user_id:
+                    continue
 
-            # 短线重连检查（在 DB 操作前，不持有连接）
-            if not await fetcher.ensure_connected():
-                logger.error(f"CDP 重连失败，跳过用户: {user_alias} ({user_id})")
-                stats["errors"] += 1
-                continue
+                # 原子认领：多机并行时只有抢到 advisory lock 的机器才处理
+                if not await try_acquire_lock(lock_conn, "user", user_id):
+                    continue
 
-            try:
-                # 1. CDP: 获取 Arrow Factor 统计（不持有数据库连接）
-                arrow_data = await fetch_user_arrowfactor(fetcher, user_id, user_url)
+                try:
+                    # 抢到锁后再检查进度（另一个机器可能已完成）
+                    async with get_db() as db:
+                        if not force and await get_progress(db, f"user_{user_id}") == "done":
+                            continue
 
-                # 2. CDP: 提取 Profile 页面字段（不持有数据库连接）
-                profile_fields = {}
-                if COLLECT_PROFILE_FIELDS and user_url:
-                    profile_fields = await fetch_user_profile_fields(
-                        fetcher, user_id, user_url
-                    )
-                    if profile_fields:
-                        logger.info(
-                            f"  {user_alias}: "
-                            + ", ".join(f"{k}={v}" for k, v in profile_fields.items() if v)
-                        )
+                    # 短线重连检查
+                    if not await fetcher.ensure_connected():
+                        logger.error(f"CDP 重连失败，跳过用户: {user_alias} ({user_id})")
+                        stats["errors"] += 1
+                        continue
 
-                # 3. DB: 获取评论 + 写入数据库（短连接，一次完成）
-                async with get_db() as db:
-                    comment_count = await process_user_comments(
-                        db, fetcher, user_id, user_alias, user_url,
-                        max_comments=max_comments_per_user,
-                    )
-                    stats["user_comments_inserted"] += comment_count
+                    try:
+                        # 1. CDP: 获取 Arrow Factor 统计（不持有数据库连接）
+                        arrow_data = await fetch_user_arrowfactor(fetcher, user_id, user_url)
 
-                    if arrow_data:
-                        await update_user_stats(
-                            db,
-                            user_id=user_id,
-                            vote_up_all=arrow_data["votes_up"],
-                            vote_down_all=arrow_data["votes_down"],
-                            comments_total=arrow_data["comment_count"],
-                        )
-                        stats["arrow_factor_ok"] += 1
-                        logger.info(
-                            f"  {user_alias}: up={arrow_data['votes_up']}, "
-                            f"down={arrow_data['votes_down']}, "
-                            f"comments={arrow_data['comment_count']}"
-                        )
-                    else:
-                        stats["arrow_factor_fail"] += 1
-                        logger.warning(f"  {user_alias}: Arrow Factor 获取失败")
+                        # 2. CDP: 提取 Profile 页面字段（不持有数据库连接）
+                        profile_fields = {}
+                        if COLLECT_PROFILE_FIELDS and user_url:
+                            profile_fields = await fetch_user_profile_fields(
+                                fetcher, user_id, user_url
+                            )
+                            if profile_fields:
+                                logger.info(
+                                    f"  {user_alias}: "
+                                    + ", ".join(f"{k}={v}" for k, v in profile_fields.items() if v)
+                                )
 
-                    if profile_fields:
-                        await update_user_profile(
-                            db,
-                            user_id=user_id,
-                            country=profile_fields.get("country"),
-                            profile_photo=profile_fields.get("profile_photo"),
-                            facebook_url=profile_fields.get("facebook_url"),
-                            member_since=profile_fields.get("member_since"),
-                        )
+                        # 3. DB: 获取评论 + 写入数据库（短连接，一次完成）
+                        async with get_db() as db:
+                            comment_count = await process_user_comments(
+                                db, fetcher, user_id, user_alias, user_url,
+                                max_comments=max_comments_per_user,
+                            )
+                            stats["user_comments_inserted"] += comment_count
 
-                    await set_progress(db, f"user_{user_id}", "done")
+                            if arrow_data:
+                                await update_user_stats(
+                                    db,
+                                    user_id=user_id,
+                                    vote_up_all=arrow_data["votes_up"],
+                                    vote_down_all=arrow_data["votes_down"],
+                                    comments_total=arrow_data["comment_count"],
+                                )
+                                stats["arrow_factor_ok"] += 1
+                                logger.info(
+                                    f"  {user_alias}: up={arrow_data['votes_up']}, "
+                                    f"down={arrow_data['votes_down']}, "
+                                    f"comments={arrow_data['comment_count']}"
+                                )
+                            else:
+                                stats["arrow_factor_fail"] += 1
+                                logger.warning(f"  {user_alias}: Arrow Factor 获取失败")
 
-                stats["users_updated"] += 1
+                            if profile_fields:
+                                await update_user_profile(
+                                    db,
+                                    user_id=user_id,
+                                    country=profile_fields.get("country"),
+                                    profile_photo=profile_fields.get("profile_photo"),
+                                    facebook_url=profile_fields.get("facebook_url"),
+                                    member_since=profile_fields.get("member_since"),
+                                )
 
-                if stats["users_updated"] % 100 == 0:
-                    logger.info(f"进度: {stats['users_updated']} 个用户已处理")
+                            await set_progress(db, f"user_{user_id}", "done")
 
-                await asyncio.sleep(COMMENT_DELAY)
+                        stats["users_updated"] += 1
 
-            except Exception as e:
-                logger.error(f"处理用户 {user_alias} ({user_id}) 异常: {e}")
-                stats["errors"] += 1
+                        if stats["users_updated"] % 100 == 0:
+                            logger.info(f"进度: {stats['users_updated']} 个用户已处理")
+
+                        await asyncio.sleep(COMMENT_DELAY)
+
+                    except Exception as e:
+                        logger.error(f"处理用户 {user_alias} ({user_id}) 异常: {e}")
+                        stats["errors"] += 1
+
+                finally:
+                    await release_lock(lock_conn, "user", user_id)
 
     finally:
         await fetcher.close()
@@ -615,20 +634,24 @@ async def aggregate_users(limit: int | None = None, max_comments_per_user: int |
 async def _process_user_worker(
     worker_id: int,
     fetcher: CDPCommentFetcher,
+    lock_conn: asyncpg.Connection,
     queue: asyncio.Queue,
     max_comments_per_user: int | None,
     stats: dict,
     lock: asyncio.Lock,
+    force: bool = False,
 ) -> None:
     """Worker: 从队列消费用户，逐人处理
 
     Args:
         worker_id: worker 编号（用于日志）
         fetcher: 已连接 dailymail.com 的 CDP fetcher
+        lock_conn: 持久 DB 连接用于 advisory lock（防多机重复）
         queue: 用户队列
         max_comments_per_user: 每用户评论上限
         stats: 共享统计 dict
         lock: 异步锁
+        force: 是否强制重新处理
     """
     while True:
         try:
@@ -645,81 +668,96 @@ async def _process_user_worker(
             queue.task_done()
             continue
 
-        # 短线重连检查
-        if not await fetcher.ensure_connected():
-            logger.error(f"[W{worker_id}] CDP 重连失败，跳过: {user_alias} ({user_id})")
-            async with lock:
-                stats["errors"] += 1
+        # 原子认领：多机并行时只有抢到 advisory lock 的 worker 才处理
+        if not await try_acquire_lock(lock_conn, "user", user_id):
             queue.task_done()
             continue
 
         try:
+            # 抢到锁后再检查进度（另一个机器可能已完成）
             async with get_db() as db:
-                # 1. Arrow Factor
-                arrow_data = await fetch_user_arrowfactor(fetcher, user_id, user_url)
+                if not force and await get_progress(db, f"user_{user_id}") == "done":
+                    queue.task_done()
+                    continue
 
-                # 2. 用户评论
-                comment_count = await process_user_comments(
-                    db, fetcher, user_id, user_alias, user_url,
-                    max_comments=max_comments_per_user,
-                )
+            # 短线重连检查
+            if not await fetcher.ensure_connected():
+                logger.error(f"[W{worker_id}] CDP 重连失败，跳过: {user_alias} ({user_id})")
+                async with lock:
+                    stats["errors"] += 1
+                queue.task_done()
+                continue
 
-                # 3. Profile 字段（仅在开关启用时采集）
-                profile_fields = {}
-                if COLLECT_PROFILE_FIELDS and user_url:
-                    profile_fields = await fetch_user_profile_fields(
-                        fetcher, user_id, user_url
+            try:
+                async with get_db() as db:
+                    # 1. Arrow Factor
+                    arrow_data = await fetch_user_arrowfactor(fetcher, user_id, user_url)
+
+                    # 2. 用户评论
+                    comment_count = await process_user_comments(
+                        db, fetcher, user_id, user_alias, user_url,
+                        max_comments=max_comments_per_user,
                     )
 
-                # 4. 更新 Arrow Factor
-                if arrow_data:
-                    await update_user_stats(
-                        db,
-                        user_id=user_id,
-                        vote_up_all=arrow_data["votes_up"],
-                        vote_down_all=arrow_data["votes_down"],
-                        comments_total=arrow_data["comment_count"],
+                    # 3. Profile 字段（仅在开关启用时采集）
+                    profile_fields = {}
+                    if COLLECT_PROFILE_FIELDS and user_url:
+                        profile_fields = await fetch_user_profile_fields(
+                            fetcher, user_id, user_url
+                        )
+
+                    # 4. 更新 Arrow Factor
+                    if arrow_data:
+                        await update_user_stats(
+                            db,
+                            user_id=user_id,
+                            vote_up_all=arrow_data["votes_up"],
+                            vote_down_all=arrow_data["votes_down"],
+                            comments_total=arrow_data["comment_count"],
+                        )
+
+                    # 5. 更新 Profile 字段
+                    if profile_fields:
+                        await update_user_profile(
+                            db,
+                            user_id=user_id,
+                            country=profile_fields.get("country"),
+                            profile_photo=profile_fields.get("profile_photo"),
+                            facebook_url=profile_fields.get("facebook_url"),
+                            member_since=profile_fields.get("member_since"),
+                        )
+
+                    # 标记用户完成（续传支持）
+                    await set_progress(db, f"user_{user_id}", "done")
+
+                # 更新共享统计
+                async with lock:
+                    stats["users_updated"] += 1
+                    stats["user_comments_inserted"] += comment_count
+                    if arrow_data:
+                        stats["arrow_factor_ok"] += 1
+                    else:
+                        stats["arrow_factor_fail"] += 1
+
+                    done = stats["users_updated"]
+                    total = stats["_total"]
+                    logger.info(
+                        f"[W{worker_id}] {user_alias}: "
+                        f"up={arrow_data['votes_up'] if arrow_data else '?'}, "
+                        f"comments={arrow_data['comment_count'] if arrow_data else '?'}, "
+                        f"({done}/{total})"
                     )
 
-                # 5. 更新 Profile 字段
-                if profile_fields:
-                    await update_user_profile(
-                        db,
-                        user_id=user_id,
-                        country=profile_fields.get("country"),
-                        profile_photo=profile_fields.get("profile_photo"),
-                        facebook_url=profile_fields.get("facebook_url"),
-                        member_since=profile_fields.get("member_since"),
-                    )
+                queue.task_done()
 
-                # 标记用户完成（续传支持）
-                await set_progress(db, f"user_{user_id}", "done")
+            except Exception as e:
+                logger.error(f"[W{worker_id}] 处理用户 {user_alias} ({user_id}) 异常: {e}")
+                async with lock:
+                    stats["errors"] += 1
+                queue.task_done()
 
-            # 更新共享统计
-            async with lock:
-                stats["users_updated"] += 1
-                stats["user_comments_inserted"] += comment_count
-                if arrow_data:
-                    stats["arrow_factor_ok"] += 1
-                else:
-                    stats["arrow_factor_fail"] += 1
-
-                done = stats["users_updated"]
-                total = stats["_total"]
-                logger.info(
-                    f"[W{worker_id}] {user_alias}: "
-                    f"up={arrow_data['votes_up'] if arrow_data else '?'}, "
-                    f"comments={arrow_data['comment_count'] if arrow_data else '?'}, "
-                    f"({done}/{total})"
-                )
-
-            queue.task_done()
-
-        except Exception as e:
-            logger.error(f"[W{worker_id}] 处理用户 {user_alias} ({user_id}) 异常: {e}")
-            async with lock:
-                stats["errors"] += 1
-            queue.task_done()
+        finally:
+            await release_lock(lock_conn, "user", user_id)
 
 
 async def aggregate_users_parallel(
@@ -814,29 +852,46 @@ async def aggregate_users_parallel(
         logger.error("所有 fetcher 连接失败")
         return stats
 
+    # 4. 为每个 worker 获取持久 lock 连接（advisory lock 绑定到连接生命周期）
+    pool = await get_pool()
+    lock_conns = []
+    for _ in range(len(fetchers)):
+        try:
+            conn = await pool.acquire()
+            lock_conns.append(conn)
+        except Exception as e:
+            logger.error(f"获取 lock 连接失败: {e}")
+
     try:
-        # 4. 填充队列
+        # 5. 填充队列
         queue = asyncio.Queue()
         for u in users:
             queue.put_nowait(dict(u))
 
-        # 5. 启动并行 worker
+        # 6. 启动并行 worker（每个 worker 持有独立 lock_conn + fetcher）
         lock = asyncio.Lock()
         workers = [
             _process_user_worker(
                 worker_id=idx + 1,
                 fetcher=f,
+                lock_conn=lc,
                 queue=queue,
                 max_comments_per_user=max_comments_per_user,
                 stats=stats,
                 lock=lock,
+                force=force,
             )
-            for idx, f in enumerate(fetchers)
+            for idx, (f, lc) in enumerate(zip(fetchers, lock_conns))
         ]
 
         await asyncio.gather(*workers)
 
     finally:
+        for lc in lock_conns:
+            try:
+                await pool.release(lc)
+            except Exception:
+                pass
         for f in fetchers:
             await f.close()
 

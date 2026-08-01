@@ -1,6 +1,7 @@
 """Daily Mail 数据库操作模块 (PostgreSQL + asyncpg)"""
 
 import asyncio
+import hashlib
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -467,6 +468,35 @@ async def get_progress(db: asyncpg.Connection, key: str, default: str = "") -> s
         key,
     )
     return row["value"] if row else default
+
+
+# ========================================================================
+# Advisory Lock（多机防重复采集）
+# ========================================================================
+
+def _make_lock_id(prefix: str, entity_id: str) -> int:
+    """将 prefix + entity_id 哈希为 int64 advisory lock ID"""
+    raw = f"{prefix}_{entity_id}"
+    return int(hashlib.md5(raw.encode()).hexdigest()[:16], 16) % (2**63 - 1)
+
+
+async def try_acquire_lock(db: asyncpg.Connection, prefix: str, entity_id: str) -> bool:
+    """尝试获取 advisory lock（非阻塞），返回 True 表示获取成功
+
+    用法: 多机并行采集时，每台机器在开始处理文章/用户前先抢锁，
+    抢到的才处理，没抢到的自动跳过，以此消除重复采集。
+
+    lock 绑定到当前连接，连接断开（含崩溃）时自动释放，无需手动清理。
+    """
+    lock_id = _make_lock_id(prefix, entity_id)
+    acquired = await db.fetchval("SELECT pg_try_advisory_lock($1)", lock_id)
+    return bool(acquired)
+
+
+async def release_lock(db: asyncpg.Connection, prefix: str, entity_id: str) -> None:
+    """释放 advisory lock"""
+    lock_id = _make_lock_id(prefix, entity_id)
+    await db.execute("SELECT pg_advisory_unlock($1)", lock_id)
 
 
 # ========================================================================

@@ -21,12 +21,15 @@ from config import (
 )
 from database import (
     get_db,
+    get_pool,
     insert_comment,
     upsert_user,
     get_articles_with_comments,
     get_comment_count_by_article,
     set_progress,
     get_progress,
+    try_acquire_lock,
+    release_lock,
 )
 
 logger = logging.getLogger(__name__)
@@ -532,50 +535,59 @@ async def scrape_comments(limit: int | None = None) -> dict:
             articles_list = await get_articles_with_comments(db, limit)
         logger.info(f"共有 {len(articles_list)} 篇文章需要采集评论")
 
-        for article in articles_list:
-            article_id = article["art_id"]
-
-            # 每篇文章获取独立短连接，避免长时间持有
-            async with get_db() as db:
-                # 检查进度
+        # 持久连接：advisory lock 绑定到连接生命周期，
+        # 连接断开（含崩溃）时 PostgreSQL 自动释放锁，无需手动清理
+        pool = await get_pool()
+        async with pool.acquire() as lock_conn:
+            for article in articles_list:
+                article_id = article["art_id"]
                 progress_key = f"comments_{article_id}"
-                if await get_progress(db, progress_key) == "done":
-                    logger.debug(f"跳过已完成的评论: {article_id}")
+
+                # 原子认领：多机并行时只有抢到 advisory lock 的机器才处理
+                if not await try_acquire_lock(lock_conn, "comment", article_id):
                     stats["articles_skipped"] += 1
                     continue
 
-                # 检查是否已采集足够
-                existing = await get_comment_count_by_article(db, article_id)
-                if existing >= article["comments_count"]:
-                    logger.debug(f"评论已足够: {article_id} ({existing}/{article['comments_count']})")
-                    stats["articles_skipped"] += 1
-                    await set_progress(db, progress_key, "done")
-                    continue
+                try:
+                    # 短连接检查进度（抢到锁后再查，避免 ABA）
+                    async with get_db() as db:
+                        if await get_progress(db, progress_key) == "done":
+                            stats["articles_skipped"] += 1
+                            continue
 
-            # 短线重连检查
-            if not await fetcher.ensure_connected():
-                logger.error(f"CDP 重连失败，跳过: {article_id}")
-                stats["errors"] += 1
-                continue
+                        existing = await get_comment_count_by_article(db, article_id)
+                        if existing >= article["comments_count"]:
+                            await set_progress(db, progress_key, "done")
+                            stats["articles_skipped"] += 1
+                            continue
 
-            try:
-                # 采集评论（内部使用同一连接）
-                async with get_db() as db:
-                    count = await scrape_comments_for_article(fetcher, db, article)
-                    stats["comments_collected"] += count
-                    stats["articles_processed"] += 1
-                    await set_progress(db, progress_key, "done")
+                    # 短线重连检查
+                    if not await fetcher.ensure_connected():
+                        logger.error(f"CDP 重连失败，跳过: {article_id}")
+                        stats["errors"] += 1
+                        continue
 
-            except Exception as e:
-                logger.error(f"采集评论异常 {article_id}: {e}")
-                stats["errors"] += 1
+                    try:
+                        # 采集评论（内部使用同一连接）
+                        async with get_db() as db:
+                            count = await scrape_comments_for_article(fetcher, db, article)
+                            stats["comments_collected"] += count
+                            stats["articles_processed"] += 1
+                            await set_progress(db, progress_key, "done")
 
-            # 每 10 篇文章记录一次进度
-            if stats["articles_processed"] % 10 == 0:
-                logger.info(
-                    f"进度: {stats['articles_processed']} 篇文章, "
-                    f"{stats['comments_collected']} 条评论"
-                )
+                    except Exception as e:
+                        logger.error(f"采集评论异常 {article_id}: {e}")
+                        stats["errors"] += 1
+
+                finally:
+                    await release_lock(lock_conn, "comment", article_id)
+
+                # 每 10 篇文章记录一次进度
+                if stats["articles_processed"] % 10 == 0:
+                    logger.info(
+                        f"进度: {stats['articles_processed']} 篇文章, "
+                        f"{stats['comments_collected']} 条评论"
+                    )
 
     finally:
         await fetcher.close()
