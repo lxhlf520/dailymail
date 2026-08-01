@@ -543,6 +543,17 @@ async def scrape_comments(limit: int | None = None) -> dict:
                 progress_key = f"comments_{article_id}"
 
                 # 原子认领：多机并行时只有抢到 advisory lock 的机器才处理
+                # 先确保 lock_conn 有效（网络抖动可能导致连接断开）
+                try:
+                    await lock_conn.execute("SELECT 1")
+                except Exception:
+                    logger.warning(f"lock_conn 断开，重新连接...")
+                    try:
+                        await lock_conn.close()
+                    except Exception:
+                        pass
+                    lock_conn = await get_lock_connection()
+
                 if not await try_acquire_lock(lock_conn, "comment", article_id):
                     stats["articles_skipped"] += 1
                     continue
@@ -579,7 +590,10 @@ async def scrape_comments(limit: int | None = None) -> dict:
                         stats["errors"] += 1
 
                 finally:
-                    await release_lock(lock_conn, "comment", article_id)
+                    try:
+                        await release_lock(lock_conn, "comment", article_id)
+                    except Exception:
+                        pass  # 连接断开时 PG 自动释放锁，无需报错
 
                 # 每 10 篇文章记录一次进度
                 if stats["articles_processed"] % 10 == 0:

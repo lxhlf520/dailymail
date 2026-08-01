@@ -537,6 +537,17 @@ async def aggregate_users(limit: int | None = None, max_comments_per_user: int |
                     continue
 
                 # 原子认领：多机并行时只有抢到 advisory lock 的机器才处理
+                # 先确保 lock_conn 有效（网络抖动可能导致连接断开）
+                try:
+                    await lock_conn.execute("SELECT 1")
+                except Exception:
+                    logger.warning(f"lock_conn 断开，重新连接...")
+                    try:
+                        await lock_conn.close()
+                    except Exception:
+                        pass
+                    lock_conn = await get_lock_connection()
+
                 if not await try_acquire_lock(lock_conn, "user", user_id):
                     continue
 
@@ -618,10 +629,16 @@ async def aggregate_users(limit: int | None = None, max_comments_per_user: int |
                         stats["errors"] += 1
 
                 finally:
-                    await release_lock(lock_conn, "user", user_id)
+                    try:
+                        await release_lock(lock_conn, "user", user_id)
+                    except Exception:
+                        pass
 
         finally:
-            await lock_conn.close()
+            try:
+                await lock_conn.close()
+            except Exception:
+                pass
 
     finally:
         await fetcher.close()
@@ -672,6 +689,17 @@ async def _process_user_worker(
             continue
 
         # 原子认领：多机并行时只有抢到 advisory lock 的 worker 才处理
+        # 先确保 lock_conn 有效
+        try:
+            await lock_conn.execute("SELECT 1")
+        except Exception:
+            logger.warning(f"[W{worker_id}] lock_conn 断开，重新连接...")
+            try:
+                await lock_conn.close()
+            except Exception:
+                pass
+            lock_conn = await get_lock_connection()
+
         if not await try_acquire_lock(lock_conn, "user", user_id):
             queue.task_done()
             continue
@@ -760,7 +788,10 @@ async def _process_user_worker(
                 queue.task_done()
 
         finally:
-            await release_lock(lock_conn, "user", user_id)
+            try:
+                await release_lock(lock_conn, "user", user_id)
+            except Exception:
+                pass
 
 
 async def aggregate_users_parallel(
