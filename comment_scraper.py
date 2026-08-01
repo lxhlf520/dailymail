@@ -21,7 +21,7 @@ from config import (
 )
 from database import (
     get_db,
-    get_pool,
+    get_lock_connection,
     insert_comment,
     upsert_user,
     get_articles_with_comments,
@@ -535,10 +535,9 @@ async def scrape_comments(limit: int | None = None) -> dict:
             articles_list = await get_articles_with_comments(db, limit)
         logger.info(f"共有 {len(articles_list)} 篇文章需要采集评论")
 
-        # 持久连接：advisory lock 绑定到连接生命周期，
-        # 连接断开（含崩溃）时 PostgreSQL 自动释放锁，无需手动清理
-        pool = await get_pool()
-        async with pool.acquire() as lock_conn:
+        # 独立直连：advisory lock 绑定到独立连接，避免与 get_db() 连接池交叉污染
+        lock_conn = await get_lock_connection()
+        try:
             for article in articles_list:
                 article_id = article["art_id"]
                 progress_key = f"comments_{article_id}"
@@ -588,6 +587,9 @@ async def scrape_comments(limit: int | None = None) -> dict:
                         f"进度: {stats['articles_processed']} 篇文章, "
                         f"{stats['comments_collected']} 条评论"
                     )
+
+        finally:
+            await lock_conn.close()
 
     finally:
         await fetcher.close()

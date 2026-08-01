@@ -471,8 +471,17 @@ async def get_progress(db: asyncpg.Connection, key: str, default: str = "") -> s
 
 
 # ========================================================================
-# Advisory Lock（多机防重复采集）
+# Advisory Lock（多机防重复采集，使用独立直连避免连接池交叉污染）
 # ========================================================================
+
+async def get_lock_connection() -> asyncpg.Connection:
+    """获取独立直连用于 advisory lock
+
+    不经过连接池，直接 connect，避免 Python 3.13 + asyncpg 连接池
+    proxy 交叉污染导致 lock_conn 被意外释放。
+    """
+    return await asyncpg.connect(PG_DSN, ssl=False, command_timeout=60)
+
 
 def _make_lock_id(prefix: str, entity_id: str) -> int:
     """将 prefix + entity_id 哈希为 int64 advisory lock ID"""

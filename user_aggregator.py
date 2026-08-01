@@ -26,7 +26,7 @@ from config import (
 )
 from database import (
     get_db,
-    get_pool,
+    get_lock_connection,
     update_user_stats,
     update_user_profile,
     upsert_user,
@@ -525,9 +525,9 @@ async def aggregate_users(limit: int | None = None, max_comments_per_user: int |
             users = await db.fetch(sql, *params)
         logger.info(f"发现 {len(users)} 个用户需要汇总 (force={force})")
 
-        # 持久连接用于 advisory lock（连接断开时 PostgreSQL 自动释放锁）
-        pool = await get_pool()
-        async with pool.acquire() as lock_conn:
+        # 独立直连用于 advisory lock（避免与 get_db() 连接池交叉污染）
+        lock_conn = await get_lock_connection()
+        try:
             for user in users:
                 user_id = user["user_id"]
                 user_alias = user["user_alias"]
@@ -619,6 +619,9 @@ async def aggregate_users(limit: int | None = None, max_comments_per_user: int |
 
                 finally:
                     await release_lock(lock_conn, "user", user_id)
+
+        finally:
+            await lock_conn.close()
 
     finally:
         await fetcher.close()
@@ -852,12 +855,11 @@ async def aggregate_users_parallel(
         logger.error("所有 fetcher 连接失败")
         return stats
 
-    # 4. 为每个 worker 获取持久 lock 连接（advisory lock 绑定到连接生命周期）
-    pool = await get_pool()
+    # 4. 为每个 worker 获取独立直连（避免与 get_db() 连接池交叉污染）
     lock_conns = []
     for _ in range(len(fetchers)):
         try:
-            conn = await pool.acquire()
+            conn = await get_lock_connection()
             lock_conns.append(conn)
         except Exception as e:
             logger.error(f"获取 lock 连接失败: {e}")
@@ -889,7 +891,7 @@ async def aggregate_users_parallel(
     finally:
         for lc in lock_conns:
             try:
-                await pool.release(lc)
+                await lc.close()
             except Exception:
                 pass
         for f in fetchers:
