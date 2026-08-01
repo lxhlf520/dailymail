@@ -536,23 +536,28 @@ async def aggregate_users(limit: int | None = None, max_comments_per_user: int |
                 if not user_id:
                     continue
 
-                # 原子认领：多机并行时只有抢到 advisory lock 的机器才处理
-                # 先确保 lock_conn 有效（网络抖动可能导致连接断开）
+                # 快速路径：已完成用户直接跳过，不做锁竞争
+                async with get_db() as db:
+                    if not force and await get_progress(db, f"user_{user_id}") == "done":
+                        continue
+
+                # 只有未完成的用户才竞争 advisory lock
                 try:
-                    await lock_conn.execute("SELECT 1")
+                    if not await try_acquire_lock(lock_conn, "user", user_id):
+                        continue
                 except Exception:
-                    logger.warning(f"lock_conn 断开，重新连接...")
+                    # lock_conn 可能断开，尝试重连后重试一次
+                    logger.warning("lock_conn 断开，重新连接...")
                     try:
                         await lock_conn.close()
                     except Exception:
                         pass
                     lock_conn = await get_lock_connection()
-
-                if not await try_acquire_lock(lock_conn, "user", user_id):
-                    continue
+                    if not await try_acquire_lock(lock_conn, "user", user_id):
+                        continue
 
                 try:
-                    # 抢到锁后再检查进度（另一个机器可能已完成）
+                    # 抢到锁后再次检查进度（另一个机器可能在快速路径后完成了）
                     async with get_db() as db:
                         if not force and await get_progress(db, f"user_{user_id}") == "done":
                             continue
@@ -688,10 +693,17 @@ async def _process_user_worker(
             queue.task_done()
             continue
 
-        # 原子认领：多机并行时只有抢到 advisory lock 的 worker 才处理
-        # 先确保 lock_conn 有效
+        # 快速路径：已完成用户直接跳过
+        async with get_db() as db:
+            if not force and await get_progress(db, f"user_{user_id}") == "done":
+                queue.task_done()
+                continue
+
+        # 只有未完成的用户才竞争 advisory lock
         try:
-            await lock_conn.execute("SELECT 1")
+            if not await try_acquire_lock(lock_conn, "user", user_id):
+                queue.task_done()
+                continue
         except Exception:
             logger.warning(f"[W{worker_id}] lock_conn 断开，重新连接...")
             try:
@@ -699,13 +711,12 @@ async def _process_user_worker(
             except Exception:
                 pass
             lock_conn = await get_lock_connection()
-
-        if not await try_acquire_lock(lock_conn, "user", user_id):
-            queue.task_done()
-            continue
+            if not await try_acquire_lock(lock_conn, "user", user_id):
+                queue.task_done()
+                continue
 
         try:
-            # 抢到锁后再检查进度（另一个机器可能已完成）
+            # 抢到锁后再次检查进度（另一个机器可能在快速路径后完成了）
             async with get_db() as db:
                 if not force and await get_progress(db, f"user_{user_id}") == "done":
                     queue.task_done()

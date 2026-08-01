@@ -542,24 +542,31 @@ async def scrape_comments(limit: int | None = None) -> dict:
                 article_id = article["art_id"]
                 progress_key = f"comments_{article_id}"
 
-                # 原子认领：多机并行时只有抢到 advisory lock 的机器才处理
-                # 先确保 lock_conn 有效（网络抖动可能导致连接断开）
+                # 快速路径：已完成文章直接跳过，不做锁竞争（绝大多数文章走这条）
+                async with get_db() as db:
+                    if await get_progress(db, progress_key) == "done":
+                        stats["articles_skipped"] += 1
+                        continue
+
+                # 只有未完成的文章才竞争 advisory lock
                 try:
-                    await lock_conn.execute("SELECT 1")
+                    if not await try_acquire_lock(lock_conn, "comment", article_id):
+                        stats["articles_skipped"] += 1
+                        continue
                 except Exception:
-                    logger.warning(f"lock_conn 断开，重新连接...")
+                    # lock_conn 可能断开，尝试重连后重试一次
+                    logger.warning("lock_conn 断开，重新连接...")
                     try:
                         await lock_conn.close()
                     except Exception:
                         pass
                     lock_conn = await get_lock_connection()
-
-                if not await try_acquire_lock(lock_conn, "comment", article_id):
-                    stats["articles_skipped"] += 1
-                    continue
+                    if not await try_acquire_lock(lock_conn, "comment", article_id):
+                        stats["articles_skipped"] += 1
+                        continue
 
                 try:
-                    # 短连接检查进度（抢到锁后再查，避免 ABA）
+                    # 抢到锁后再次检查进度（另一个机器可能在快速路径后完成了）
                     async with get_db() as db:
                         if await get_progress(db, progress_key) == "done":
                             stats["articles_skipped"] += 1
