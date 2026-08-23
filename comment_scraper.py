@@ -35,6 +35,10 @@ from database import (
 logger = logging.getLogger(__name__)
 
 
+class ArticleGoneError(Exception):
+    """文章已被 Daily Mail 删除 (HTTP 410 Gone)，直接跳过，不重试"""
+
+
 class CDPCommentFetcher:
     """通过 Chrome DevTools Protocol 获取评论"""
 
@@ -261,6 +265,11 @@ class CDPCommentFetcher:
                                 logger.error(f"JSON 解析错误: {e}")
                                 return None
 
+                        # 410: 文章已被删除，直接标记跳过，不重试
+                        if status == 410:
+                            logger.warning(f"文章已删除 (410): {article_id}")
+                            return {"deleted": True}
+
                         # 429 / 403: Akamai WAF 限流或拒绝访问
                         if status in (429, 403):
                             is_challenge = "cpr_chlge" in body
@@ -483,6 +492,10 @@ async def scrape_comments_for_article(
             logger.error(f"无法获取评论数据: {article_id}")
             break
 
+        # 410: 文章已删除，抛特殊异常让上层标记 done 跳过
+        if data.get("deleted"):
+            raise ArticleGoneError(article_id)
+
         payload = data.get("payload", {})
         comments = payload.get("page", [])
         parent_count = payload.get("parentCommentsCount", 0)
@@ -620,6 +633,16 @@ async def scrape_comments(limit: int | None = None) -> dict:
                                     f"标记进度失败 {article_id} (attempt {attempt + 1}): {e}"
                                 )
                                 await asyncio.sleep(1)
+
+                    except ArticleGoneError:
+                        # 文章已删除 (410): 标记完成跳过，避免每次运行都重试
+                        logger.info(f"文章已删除(410), 标记跳过: {article_id}")
+                        stats["articles_skipped"] += 1
+                        try:
+                            async with get_db() as db:
+                                await set_progress(db, progress_key, "done")
+                        except Exception:
+                            pass
 
                     except Exception as e:
                         logger.error(f"采集评论异常 {article_id}: {e}")
