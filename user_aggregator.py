@@ -329,7 +329,6 @@ async def fetch_user_comments_page(
 
 
 async def process_user_comments(
-    db: asyncpg.Connection,
     fetcher: CDPCommentFetcher,
     user_id: str,
     user_alias: str,
@@ -343,6 +342,11 @@ async def process_user_comments(
 
     Returns:
         插入的评论数量
+
+    Note:
+        不使用外部传入的 db 长连接: CDP 重连等异常路径下
+        asyncpg 池代理可能被提前释放(Python 3.13 已知问题),
+        每翻页一页重新 acquire 短连接, 坏一个不影响后续写入。
     """
     total_inserted = 0
     offset = 0
@@ -357,96 +361,15 @@ async def process_user_comments(
         if not comments:
             break
 
-        for cmt in comments:
-            comment_id = str(cmt.get("id", ""))
-            if not comment_id:
-                continue
-
-            # 从用户评论API获取的数据结构
-            asset_id = str(cmt.get("assetId", ""))
-            vote_count = cmt.get("voteCount", 0)
-            vote_rating = cmt.get("voteRating", 0)
-            upvote = (vote_count + vote_rating) // 2
-            down_vote = (vote_count - vote_rating) // 2
-
-            comment_text = cmt.get("message") or ""
-            comment_time = cmt.get("dateCreated") or ""
-            location_str = cmt.get("userLocation") or ""
-            city, country = parse_location(location_str)
-
-            # 构建评论URL
-            asset_url = cmt.get("assetUrl") or ""
-            if asset_url:
-                comment_url = f"https://www.dailymail.com{asset_url}#comment-{comment_id}"
-            else:
-                comment_url = ""
-
-            # 获取回复信息（用户评论API也可能返回replies）
-            reply_to = None  # 用户评论API不返回reply_to信息
-            replies_data = cmt.get("replies", {})
-            if isinstance(replies_data, dict):
-                sub_comments = replies_data.get("comments", [])
-            else:
-                sub_comments = []
-
-            try:
-                await insert_user_comment(
-                    db,
-                    article_id=asset_id,
-                    comment_id=comment_id,
-                    reply_to=reply_to,
-                    comment=comment_text,
-                    comment_time=comment_time,
-                    city=city,
-                    country=country,
-                    upvote=upvote,
-                    down_vote=down_vote,
-                    vote_rating=vote_rating,
-                    user_alias=user_alias,
-                    user_id=user_id,
-                    comment_url=comment_url,
+        # 短连接写入本页评论
+        try:
+            async with get_db() as db:
+                total_inserted += await _write_user_comments_page(
+                    db, comments, user_id, user_alias
                 )
-                total_inserted += 1
-            except Exception as e:
-                logger.error(f"插入用户评论失败 {comment_id}: {e}")
-
-            # 处理子回复
-            if sub_comments:
-                for sub in sub_comments:
-                    sub_id = str(sub.get("id", ""))
-                    if not sub_id:
-                        continue
-                    sub_vc = sub.get("voteCount", 0)
-                    sub_vr = sub.get("voteRating", 0)
-                    sub_up = (sub_vc + sub_vr) // 2
-                    sub_down = (sub_vc - sub_vr) // 2
-                    sub_text = sub.get("message") or ""
-                    sub_time = sub.get("dateCreated") or ""
-                    sub_loc = sub.get("userLocation") or ""
-                    sub_city, sub_country = parse_location(sub_loc)
-                    sub_asset_url = sub.get("assetUrl") or asset_url
-                    sub_comment_url = f"https://www.dailymail.com{sub_asset_url}#comment-{sub_id}" if sub_asset_url else ""
-
-                    try:
-                        await insert_user_comment(
-                            db,
-                            article_id=asset_id,
-                            comment_id=sub_id,
-                            reply_to=comment_id,
-                            comment=sub_text,
-                            comment_time=sub_time,
-                            city=sub_city,
-                            country=sub_country,
-                            upvote=sub_up,
-                            down_vote=sub_down,
-                            vote_rating=sub_vr,
-                            user_alias=user_alias,
-                            user_id=user_id,
-                            comment_url=sub_comment_url,
-                        )
-                        total_inserted += 1
-                    except Exception as e:
-                        logger.error(f"插入用户子评论失败 {sub_id}: {e}")
+        except Exception as e:
+            logger.error(f"写入用户评论失败 {user_id} (offset={offset}): {e}")
+            raise  # 上层标记失败, 不写 done 进度, 下次重采
 
         offset += len(comments)
         if offset >= parent_count:
@@ -460,6 +383,108 @@ async def process_user_comments(
         await asyncio.sleep(COMMENT_DELAY)
 
     return total_inserted
+
+
+async def _write_user_comments_page(
+    db: asyncpg.Connection,
+    comments: list,
+    user_id: str,
+    user_alias: str,
+) -> int:
+    """写入一页用户评论，返回插入数量（由短连接调用）"""
+    inserted = 0
+    for cmt in comments:
+        comment_id = str(cmt.get("id", ""))
+        if not comment_id:
+            continue
+
+        # 从用户评论API获取的数据结构
+        asset_id = str(cmt.get("assetId", ""))
+        vote_count = cmt.get("voteCount", 0)
+        vote_rating = cmt.get("voteRating", 0)
+        upvote = (vote_count + vote_rating) // 2
+        down_vote = (vote_count - vote_rating) // 2
+
+        comment_text = cmt.get("message") or ""
+        comment_time = cmt.get("dateCreated") or ""
+        location_str = cmt.get("userLocation") or ""
+        city, country = parse_location(location_str)
+
+        # 构建评论URL
+        asset_url = cmt.get("assetUrl") or ""
+        if asset_url:
+            comment_url = f"https://www.dailymail.com{asset_url}#comment-{comment_id}"
+        else:
+            comment_url = ""
+
+        # 获取回复信息（用户评论API也可能返回replies）
+        reply_to = None  # 用户评论API不返回reply_to信息
+        replies_data = cmt.get("replies", {})
+        if isinstance(replies_data, dict):
+            sub_comments = replies_data.get("comments", [])
+        else:
+            sub_comments = []
+
+        try:
+            await insert_user_comment(
+                db,
+                article_id=asset_id,
+                comment_id=comment_id,
+                reply_to=reply_to,
+                comment=comment_text,
+                comment_time=comment_time,
+                city=city,
+                country=country,
+                upvote=upvote,
+                down_vote=down_vote,
+                vote_rating=vote_rating,
+                user_alias=user_alias,
+                user_id=user_id,
+                comment_url=comment_url,
+            )
+            inserted += 1
+        except Exception as e:
+            logger.error(f"插入用户评论失败 {comment_id}: {e}")
+
+        # 处理子回复
+        if sub_comments:
+            for sub in sub_comments:
+                sub_id = str(sub.get("id", ""))
+                if not sub_id:
+                    continue
+                sub_vc = sub.get("voteCount", 0)
+                sub_vr = sub.get("voteRating", 0)
+                sub_up = (sub_vc + sub_vr) // 2
+                sub_down = (sub_vc - sub_vr) // 2
+                sub_text = sub.get("message") or ""
+                sub_time = sub.get("dateCreated") or ""
+                sub_loc = sub.get("userLocation") or ""
+                sub_city, sub_country = parse_location(sub_loc)
+                sub_asset_url = sub.get("assetUrl") or asset_url
+                sub_comment_url = f"https://www.dailymail.com{sub_asset_url}#comment-{sub_id}" if sub_asset_url else ""
+
+                try:
+                    await insert_user_comment(
+                        db,
+                        article_id=asset_id,
+                        comment_id=sub_id,
+                        reply_to=comment_id,
+                        comment=sub_text,
+                        comment_time=sub_time,
+                        city=sub_city,
+                        country=sub_country,
+                        upvote=sub_up,
+                        down_vote=sub_down,
+                        vote_rating=sub_vr,
+                        user_alias=user_alias,
+                        user_id=user_id,
+                        comment_url=sub_comment_url,
+                    )
+                    inserted += 1
+                except Exception as e:
+                    logger.error(f"插入用户子评论失败 {sub_id}: {e}")
+
+    return inserted
 
 
 async def aggregate_users(limit: int | None = None, max_comments_per_user: int | None = None, force: bool = False) -> dict:
@@ -584,14 +609,15 @@ async def aggregate_users(limit: int | None = None, max_comments_per_user: int |
                                     + ", ".join(f"{k}={v}" for k, v in profile_fields.items() if v)
                                 )
 
-                        # 3. DB: 获取评论 + 写入数据库（短连接，一次完成）
-                        async with get_db() as db:
-                            comment_count = await process_user_comments(
-                                db, fetcher, user_id, user_alias, user_url,
-                                max_comments=max_comments_per_user,
-                            )
-                            stats["user_comments_inserted"] += comment_count
+                        # 3. CDP: 获取用户评论并写入（内部短连接）
+                        comment_count = await process_user_comments(
+                            fetcher, user_id, user_alias, user_url,
+                            max_comments=max_comments_per_user,
+                        )
+                        stats["user_comments_inserted"] += comment_count
 
+                        # 4. DB: 更新统计 + Profile + 标记完成（短连接）
+                        async with get_db() as db:
                             if arrow_data:
                                 await update_user_stats(
                                     db,
@@ -731,24 +757,24 @@ async def _process_user_worker(
                 continue
 
             try:
-                async with get_db() as db:
-                    # 1. Arrow Factor
-                    arrow_data = await fetch_user_arrowfactor(fetcher, user_id, user_url)
+                # 1. CDP: Arrow Factor（不持有数据库连接）
+                arrow_data = await fetch_user_arrowfactor(fetcher, user_id, user_url)
 
-                    # 2. 用户评论
-                    comment_count = await process_user_comments(
-                        db, fetcher, user_id, user_alias, user_url,
-                        max_comments=max_comments_per_user,
+                # 2. CDP: 用户评论（内部短连接写入）
+                comment_count = await process_user_comments(
+                    fetcher, user_id, user_alias, user_url,
+                    max_comments=max_comments_per_user,
+                )
+
+                # 3. CDP: Profile 字段（仅在开关启用时采集）
+                profile_fields = {}
+                if COLLECT_PROFILE_FIELDS and user_url:
+                    profile_fields = await fetch_user_profile_fields(
+                        fetcher, user_id, user_url
                     )
 
-                    # 3. Profile 字段（仅在开关启用时采集）
-                    profile_fields = {}
-                    if COLLECT_PROFILE_FIELDS and user_url:
-                        profile_fields = await fetch_user_profile_fields(
-                            fetcher, user_id, user_url
-                        )
-
-                    # 4. 更新 Arrow Factor
+                # 4. DB: 更新统计 + Profile + 标记完成（短连接）
+                async with get_db() as db:
                     if arrow_data:
                         await update_user_stats(
                             db,
@@ -758,7 +784,6 @@ async def _process_user_worker(
                             comments_total=arrow_data["comment_count"],
                         )
 
-                    # 5. 更新 Profile 字段
                     if profile_fields:
                         await update_user_profile(
                             db,
@@ -769,7 +794,6 @@ async def _process_user_worker(
                             member_since=profile_fields.get("member_since"),
                         )
 
-                    # 标记用户完成（续传支持）
                     await set_progress(db, f"user_{user_id}", "done")
 
                 # 更新共享统计

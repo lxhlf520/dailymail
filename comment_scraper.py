@@ -447,13 +447,21 @@ async def process_comment_tree(
 
 async def scrape_comments_for_article(
     fetcher: CDPCommentFetcher,
-    db: asyncpg.Connection,
     article: dict,
 ) -> int:
     """采集单篇文章的所有评论
 
+    Args:
+        fetcher: CDP 评论抓取器
+        article: 文章数据 (art_id/url/comments_count)
+
     Returns:
         采集到的评论总数
+
+    Note:
+        不使用外部传入的 db 长连接: CDP 重连等异常路径下
+        asyncpg 池代理可能被提前释放(Python 3.13 已知问题),
+        每翻页一页重新 acquire 短连接, 坏一个不影响后续写入。
     """
     article_id = article["art_id"]
     article_url = article["url"]
@@ -482,7 +490,13 @@ async def scrape_comments_for_article(
         if not comments:
             break
 
-        count = await process_comment_tree(db, article_id, article_url, comments)
+        # 短连接写入评论树
+        try:
+            async with get_db() as db:
+                count = await process_comment_tree(db, article_id, article_url, comments)
+        except Exception as e:
+            logger.error(f"写入评论失败 {article_id} (offset={offset}): {e}")
+            raise  # 上层标记失败, 不写 done 进度, 下次重采
         total_collected += count
 
         logger.info(
@@ -503,6 +517,12 @@ async def scrape_comments_for_article(
         )
     else:
         logger.info(f"评论采集完成: {article_id} 共 {total_collected} 条")
+
+    # 有评论显示却一条都没采到：判定为采集失败，不标记 done，下次重采
+    if expected_count > 0 and total_collected == 0:
+        raise RuntimeError(
+            f"评论采集失败 {article_id}: 预期 {expected_count} 条, 实际 0 条"
+        )
 
     return total_collected
 
@@ -585,12 +605,21 @@ async def scrape_comments(limit: int | None = None) -> dict:
                         continue
 
                     try:
-                        # 采集评论（内部使用同一连接）
-                        async with get_db() as db:
-                            count = await scrape_comments_for_article(fetcher, db, article)
-                            stats["comments_collected"] += count
-                            stats["articles_processed"] += 1
-                            await set_progress(db, progress_key, "done")
+                        # 采集评论（内部使用短连接，CDP 重连异常不影响后续写入）
+                        count = await scrape_comments_for_article(fetcher, article)
+                        stats["comments_collected"] += count
+                        stats["articles_processed"] += 1
+                        # 标记进度（独立短连接；失败重试一次，避免文章完成但进度未标记）
+                        for attempt in range(2):
+                            try:
+                                async with get_db() as db:
+                                    await set_progress(db, progress_key, "done")
+                                break
+                            except Exception as e:
+                                logger.warning(
+                                    f"标记进度失败 {article_id} (attempt {attempt + 1}): {e}"
+                                )
+                                await asyncio.sleep(1)
 
                     except Exception as e:
                         logger.error(f"采集评论异常 {article_id}: {e}")
