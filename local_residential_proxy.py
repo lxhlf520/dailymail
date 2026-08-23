@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""本地无认证 HTTP 代理 → 住宅代理(SOCKS5+认证)转发器
+"""本地无认证 HTTP 代理 → v2rayN socks5 转发器
 
-链路: Chrome → 127.0.0.1:18080(本脚本) → v2rayN socks5:10808 → VPS → 住宅代理 104.140.99.69:36270 → 目标站
+链路: Chrome → 127.0.0.1:18080(本脚本) → v2rayN socks5:10808 → VPS → 目标站
 
-用途: Chrome --proxy-server 不支持用户名密码认证,此脚本将住宅代理的
-SOCKS5 认证转发为本地无认证 HTTP 代理。
+用途: Chrome --proxy-server 直接支持无认证 socks5,若只需 v2ray 出口
+可直接用 --proxy-server=socks5://127.0.0.1:10808;本脚本保留 HTTP
+入口,方便 Chrome 只填 HTTP 代理。
 
 用法: py local_residential_proxy.py
 """
@@ -17,9 +18,6 @@ LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = 18080
 
 V2RAY_SOCKS5 = ("127.0.0.1", 10808)
-RESI_SOCKS5 = ("104.140.99.69", 36270)
-RESI_USER = "22A3ZFDA1041409969A36270"
-RESI_PASS = "eWqfIBvgs1Nt"
 
 
 async def socks5_connect(reader, writer, host: str, port: int, user=None, password=None) -> None:
@@ -31,6 +29,7 @@ async def socks5_connect(reader, writer, host: str, port: int, user=None, passwo
         raise ConnectionError(f"上游非 SOCKS5: {resp}")
     method = resp[1]
     if method == 0x02 and user is not None:
+        assert user is not None and password is not None
         ub = user.encode()
         pb = password.encode()
         writer.write(b"\x01" + bytes([len(ub)]) + ub + bytes([len(pb)]) + pb)
@@ -62,14 +61,10 @@ async def socks5_connect(reader, writer, host: str, port: int, user=None, passwo
 
 
 async def build_chain(host: str, port: int):
-    """建立 本机→v2ray→住宅代理 的 SOCKS5 链,返回 (reader, writer)
-
-    在经 v2ray 到达住宅代理的同一条连接上完成 SOCKS5 认证并 CONNECT 目标。
-    """
+    """建立 本机→v2ray 的 SOCKS5 连接并 CONNECT 目标,返回 (reader, writer)"""
     r1, w1 = await asyncio.open_connection(*V2RAY_SOCKS5)
     try:
-        await socks5_connect(r1, w1, RESI_SOCKS5[0], RESI_SOCKS5[1])
-        await socks5_connect(r1, w1, host, port, RESI_USER, RESI_PASS)
+        await socks5_connect(r1, w1, host, port)
         return r1, w1
     except Exception:
         w1.close()
@@ -150,7 +145,7 @@ async def handle_client(cli_reader, cli_writer):
 async def main():
     server = await asyncio.start_server(handle_client, LISTEN_HOST, LISTEN_PORT)
     print(f"转发代理已启动: http://{LISTEN_HOST}:{LISTEN_PORT}")
-    print(f"链路: 本机 → v2rayN:{V2RAY_SOCKS5[1]} → {RESI_SOCKS5[0]}:{RESI_SOCKS5[1]} → 目标")
+    print(f"链路: 本机 → v2rayN:{V2RAY_SOCKS5[1]} → VPS → 目标")
     async with server:
         await server.serve_forever()
 
